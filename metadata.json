@@ -1,0 +1,6 @@
+{
+  "name": "Financial Conversation Agent",
+  "description": "An AI-powered financial conversation agent with visitor tracking, immediate answer persistence, dynamic qualification, and CRM handoff.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
