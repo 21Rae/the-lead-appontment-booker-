@@ -1,6 +1,6 @@
 {
-  "name": "Financial Conversation Agent",
-  "description": "An AI-powered financial conversation agent with visitor tracking, immediate answer persistence, dynamic qualification, and CRM handoff.",
+  "name": "Matt Strategy Futuristic",
+  "description": "Chartered Wealth Advisory Digital Consultant for Matt Strategy Futuristic with real-time profiling, instant answer persistence, dynamic qualification, and offline-resilient state engine.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

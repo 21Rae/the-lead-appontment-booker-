@@ -6,6 +6,7 @@ import { db } from './server/db';
 import { conversationEngine } from './server/engine';
 import { APPROVED_EDUCATIONAL_TOPICS } from './server/knowledge';
 import { generateAdviserSummary } from './server/gemini';
+import { testSupabaseConnection, syncLeadSubmissionToSupabase, syncConsultationToSupabase } from './server/supabase';
 
 dotenv.config();
 
@@ -26,6 +27,20 @@ async function startServer() {
   // Health check
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  // Supabase connection status check
+  app.get('/api/supabase/status', async (req, res) => {
+    try {
+      const status = await testSupabaseConnection();
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({
+        connected: false,
+        configured: false,
+        error: err.message
+      });
+    }
   });
 
   // 1. Visitors: Init / Retrieve / Update
@@ -83,25 +98,31 @@ async function startServer() {
     }
   });
 
-  // Email capture: updates existing visitor record without creating new one
+  // Email capture: updates visitor record and immediately syncs to Supabase lead_submissions
   app.post('/api/visitors/:id/email', (req, res) => {
     try {
-      const { email, first_name, last_name, phone } = req.body;
-      const visitor = db.getVisitor(req.params.id);
-      if (!visitor) {
-        return res.status(404).json({ error: 'Visitor not found' });
-      }
+      const { email, first_name, last_name, phone, conversation_id } = req.body;
+      const visitor = db.getVisitor(req.params.id) || db.getOrCreateVisitor({ visitor_id: req.params.id });
 
       const updatedVisitor = db.updateVisitor(visitor.visitor_id, {
         email: email || visitor.email,
         first_name: first_name || visitor.first_name,
         last_name: last_name || visitor.last_name,
         phone: phone || visitor.phone
-      });
+      }) || visitor;
+
+      if (conversation_id) {
+        const conv = db.getConversation(conversation_id) || db.getOrCreateConversation({
+          visitor_id: visitor.visitor_id,
+          conversation_id
+        });
+        const answers = db.getConversationAnswers(conversation_id);
+        syncLeadSubmissionToSupabase({ visitor: updatedVisitor, conversation: conv, answers }).catch(() => {});
+      }
 
       db.logEvent({
         visitor_id: visitor.visitor_id,
-        conversation_id: req.body.conversation_id || 'general',
+        conversation_id: conversation_id || 'general',
         event_type: 'email_submitted',
         event_data: { email, first_name, last_name }
       });
@@ -263,9 +284,9 @@ async function startServer() {
     }
   });
 
-  app.post('/api/conversations/:id/booking', (req, res) => {
+  app.post('/api/conversations/:id/booking', async (req, res) => {
     try {
-      const { slot, adviser_name } = req.body;
+      const { slot, adviser_name, email, first_name, last_name, full_name, phone } = req.body;
       const conv = db.updateConversation(req.params.id, {
         status: 'booked',
         booking_slot: slot || 'Thursday at 11:00 AM',
@@ -273,6 +294,24 @@ async function startServer() {
       });
 
       if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+
+      const visitor = db.getVisitor(conv.visitor_id);
+      const bookingEmail = email || visitor?.email;
+      const bookingName = full_name || [first_name || visitor?.first_name, last_name || visitor?.last_name].filter(Boolean).join(' ') || visitor?.first_name;
+      const bookingPhone = phone || visitor?.phone;
+
+      // Sync to consultations table in Supabase
+      if (bookingEmail) {
+        await syncConsultationToSupabase({
+          email: bookingEmail,
+          full_name: bookingName || undefined,
+          phone: bookingPhone || undefined,
+          selected_time_slot: slot || 'Thursday, 11:00 AM (BST)',
+          consultant_name: adviser_name || 'Marcus Sterling, CFP®',
+          consultation_type: '20-minute video discovery call',
+          conversation_id: conv.conversation_id
+        }).catch(() => {});
+      }
 
       db.logEvent({
         visitor_id: conv.visitor_id,

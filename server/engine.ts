@@ -142,6 +142,13 @@ export class ConversationEngine {
       submission_id: req.submission_id
     });
 
+    // Auto-detect email in answer value or raw text
+    const textToCheck = `${req.raw_answer || ''} ${req.answer_value || ''} ${req.answer_label || ''}`;
+    const emailMatch = textToCheck.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (emailMatch && (!visitor.email || visitor.email !== emailMatch[0])) {
+      db.updateVisitor(visitor.visitor_id, { email: emailMatch[0] });
+    }
+
     // Fetch all updated answers for context
     const allAnswers = db.getConversationAnswers(req.conversation_id);
     const questionsAnswered = allAnswers.map((a) => a.question_id);
@@ -283,6 +290,12 @@ export class ConversationEngine {
       sender: 'user',
       text: params.userText
     });
+
+    // Check if free text contains an email
+    const freeTextEmailMatch = params.userText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (freeTextEmailMatch && (!visitor.email || visitor.email !== freeTextEmailMatch[0])) {
+      db.updateVisitor(visitor.visitor_id, { email: freeTextEmailMatch[0] });
+    }
 
     const answers = db.getConversationAnswers(params.conversation_id);
     const questionsAnswered = answers.map((a) => a.question_id);

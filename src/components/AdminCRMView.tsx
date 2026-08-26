@@ -20,9 +20,12 @@ import {
   ChevronRight,
   Database,
   TrendingUp,
-  ShieldCheck
+  ShieldCheck,
+  Server
 } from 'lucide-react';
 import { Visitor, Conversation, ConversationAnswer, ConversationEvent, ChatMessage } from '../types';
+import { getClientCRMData, clientStore } from '../lib/clientFallbackEngine';
+import { checkSupabaseStatus } from '../lib/supabase';
 
 interface EnrichedVisitor extends Visitor {
   conversations_count: number;
@@ -55,6 +58,11 @@ export const AdminCRMView: React.FC = () => {
   const [campaignFilter, setCampaignFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
+  const [supabaseStatus, setSupabaseStatus] = useState<{
+    configured: boolean;
+    connected: boolean;
+    message: string;
+  } | null>(null);
 
   const fetchCRMData = async () => {
     setIsLoading(true);
@@ -64,38 +72,53 @@ export const AdminCRMView: React.FC = () => {
         fetch('/api/admin/analytics')
       ]);
 
-      if (resVisitors.ok) {
+      if (resVisitors.ok && resAnalytics.ok) {
         const data = await resVisitors.json();
+        const analyticsData = await resAnalytics.json();
         setVisitors(data.visitors || []);
         if (data.visitors && data.visitors.length > 0 && !selectedVisitor) {
           setSelectedVisitor(data.visitors[0]);
         }
-      }
-
-      if (resAnalytics.ok) {
-        const data = await resAnalytics.json();
-        setAnalytics(data);
+        setAnalytics(analyticsData);
+        setIsLoading(false);
+        return;
       }
     } catch (err) {
-      console.error('Failed to fetch CRM data:', err);
-    } finally {
-      setIsLoading(false);
+      console.warn('API fetch failed, utilizing client CRM store:', err);
     }
+
+    // Local client CRM data fallback
+    const localCRM = getClientCRMData();
+    setVisitors(localCRM.visitors as any);
+    if (localCRM.visitors && localCRM.visitors.length > 0 && !selectedVisitor) {
+      setSelectedVisitor(localCRM.visitors[0] as any);
+    }
+    setAnalytics(localCRM.analytics as any);
+    setIsLoading(false);
   };
 
   useEffect(() => {
     fetchCRMData();
+    checkSupabaseStatus().then((status) => setSupabaseStatus(status));
   }, []);
 
   // Fetch messages when selected visitor changes
   useEffect(() => {
     if (selectedVisitor && selectedVisitor.latest_conversation) {
-      fetch(`/api/conversations/${selectedVisitor.latest_conversation.conversation_id}`)
-        .then((res) => res.json())
+      const convId = selectedVisitor.latest_conversation.conversation_id;
+      fetch(`/api/conversations/${convId}`)
+        .then((res) => {
+          if (!res.ok) throw new Error('Not found');
+          return res.json();
+        })
         .then((data) => {
           setSelectedConvMessages(data.messages || []);
         })
-        .catch((e) => console.error(e));
+        .catch(() => {
+          // Fallback to local store
+          const localMsgs = clientStore.getMessages(convId);
+          setSelectedConvMessages(localMsgs);
+        });
     }
   }, [selectedVisitor]);
 
@@ -143,18 +166,40 @@ export const AdminCRMView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Supabase Status Pill */}
+          <div
+            id="supabase-status-pill"
+            className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 border ${
+              supabaseStatus?.connected
+                ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/50'
+                : supabaseStatus?.configured
+                ? 'bg-amber-950/80 text-amber-300 border-amber-700/50'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+            title={supabaseStatus?.message || 'Checking Supabase connection...'}
+          >
+            <Database className="w-3.5 h-3.5 text-emerald-400" />
+            <span>
+              {supabaseStatus?.connected
+                ? 'Supabase Connected'
+                : supabaseStatus?.configured
+                ? 'Supabase Configured'
+                : 'Supabase Ready (Set Keys in .env)'}
+            </span>
+          </div>
+
           <button
             id="crm-refresh-btn"
             onClick={fetchCRMData}
             disabled={isLoading}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition flex items-center gap-1.5 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} /> Refresh Pipeline
           </button>
           <button
             id="crm-reset-db-btn"
             onClick={handleResetData}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-red-900/60 text-slate-300 hover:text-red-200 border border-slate-700 rounded-lg text-xs font-medium transition"
+            className="px-3 py-1.5 bg-slate-800 hover:bg-red-900/60 text-slate-300 hover:text-red-200 border border-slate-700 rounded-lg text-xs font-medium transition cursor-pointer"
           >
             Reset Seed Data
           </button>

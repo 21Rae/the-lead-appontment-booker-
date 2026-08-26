@@ -82,6 +82,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [hasDismissedResumeCard, setHasDismissedResumeCard] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Email Gate state
+  const [gateEmail, setGateEmail] = useState('');
+  const [gateError, setGateError] = useState<string | null>(null);
+  const [isSubmittingGate, setIsSubmittingGate] = useState(false);
+  const gateEmailInputRef = useRef<HTMLInputElement>(null);
+
+  const hasEmail = Boolean(visitor?.email && visitor.email.includes('@'));
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -90,7 +98,38 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, saveStatus, isSubmitting]);
+  }, [messages, saveStatus, isSubmitting, hasEmail]);
+
+  // Initial Email submit handler
+  const handleInitialEmailSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = gateEmail.trim();
+    if (!clean || !clean.includes('@') || !clean.includes('.')) {
+      setGateError('Please provide a valid email address to continue.');
+      gateEmailInputRef.current?.focus();
+      return;
+    }
+
+    setIsSubmittingGate(true);
+    setGateError(null);
+
+    try {
+      await onCaptureEmail(clean);
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2500);
+    } catch (err) {
+      console.error('Email capture failed:', err);
+      setGateError('Unable to save email right now. Please try again.');
+    } finally {
+      setIsSubmittingGate(false);
+    }
+  };
+
+  const promptForEmail = () => {
+    setGateError('Please enter your email above to begin.');
+    gateEmailInputRef.current?.focus();
+    gateEmailInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 
   // Find latest agent question message
   const latestAgentMessage = [...messages].reverse().find((m) => m.sender === 'agent');
@@ -122,6 +161,11 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // Handle single option button selection
   const handleSelectOption = async (option: MessageOption) => {
+    if (!hasEmail) {
+      promptForEmail();
+      return;
+    }
+
     if (!latestAgentMessage || isSubmitting) return;
 
     setIsSubmitting(true);
@@ -159,6 +203,11 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // Handle multi-select toggle
   const toggleMultiSelect = (val: string) => {
+    if (!hasEmail) {
+      promptForEmail();
+      return;
+    }
+
     if (selectedMulti.includes(val)) {
       setSelectedMulti(selectedMulti.filter((v) => v !== val));
     } else {
@@ -168,6 +217,11 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // Submit multi-select choices
   const handleSubmitMultiSelect = async () => {
+    if (!hasEmail) {
+      promptForEmail();
+      return;
+    }
+
     if (selectedMulti.length === 0 || !latestAgentMessage || isSubmitting) return;
 
     setIsSubmitting(true);
@@ -205,6 +259,12 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   // Submit free text message
   const handleSendText = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+
+    if (!hasEmail) {
+      promptForEmail();
+      return;
+    }
+
     if (!inputText.trim() || isSubmitting) return;
 
     const text = inputText.trim();
@@ -443,174 +503,245 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         {latestAgentMessage && !isSubmitting && (
           <div className="max-w-2xl mr-auto space-y-3 pt-2">
             
-            {/* 1. Multi-Select Options if configured */}
-            {latestAgentMessage.allowMultiSelect && latestAgentMessage.options && (
-              <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-3">
-                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex items-center justify-between">
-                  <span>Select all that apply</span>
-                  <span>{selectedMulti.length} selected</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {latestAgentMessage.options.map((opt) => {
-                    const isSelected = selectedMulti.includes(opt.value);
-                    return (
-                      <button
-                        key={opt.id}
-                        id={`multi-opt-${opt.id}`}
-                        onClick={() => toggleMultiSelect(opt.value)}
-                        className={`p-3 rounded-xl text-left text-xs font-semibold transition border flex items-center justify-between ${
-                          isSelected
-                            ? 'bg-emerald-50 border-emerald-500 text-emerald-950 shadow-2xs'
-                            : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'
-                        }`}
-                      >
-                        <span>{opt.label}</span>
-                        {isSelected && <Check className="w-3.5 h-3.5 text-emerald-600" />}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <button
-                  id="multi-select-continue-btn"
-                  onClick={handleSubmitMultiSelect}
-                  disabled={selectedMulti.length === 0}
-                  className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold text-xs transition flex items-center justify-center gap-1.5 shadow-xs"
-                >
-                  <span>Continue</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-
-            {/* 2. Structured Single-Choice Button Grid */}
-            {!latestAgentMessage.allowMultiSelect &&
-              latestAgentMessage.options &&
-              latestAgentMessage.options.length > 0 &&
-              !showFreeTextInput && (
-                <div className="space-y-2">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {latestAgentMessage.options.map((opt) => (
-                      <button
-                        key={opt.id}
-                        id={`chat-opt-btn-${opt.id}`}
-                        onClick={() => handleSelectOption(opt)}
-                        className="p-3.5 rounded-xl text-left bg-white hover:bg-emerald-50/60 border border-slate-200/90 hover:border-emerald-500/80 text-xs sm:text-sm font-semibold text-slate-800 hover:text-emerald-950 transition-all duration-150 shadow-2xs hover:shadow-xs flex items-center justify-between group active:scale-[0.99]"
-                      >
-                        <span>{opt.label}</span>
-                        <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-600 transition-colors" />
-                      </button>
-                    ))}
+            {/* MANDATORY EMAIL ACCESS GATE: User MUST provide email before interacting */}
+            {!hasEmail ? (
+              <div className="p-5 sm:p-6 bg-white rounded-2xl border-2 border-emerald-600/30 shadow-md space-y-4 max-w-xl">
+                <div className="flex items-start gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center shrink-0">
+                    <Mail className="w-5 h-5 text-emerald-700" />
                   </div>
-
-                  {/* Toggle to type custom response */}
-                  <div className="text-right">
-                    <button
-                      id="type-custom-answer-toggle-btn"
-                      onClick={() => setShowFreeTextInput(true)}
-                      className="text-[11px] font-medium text-slate-500 hover:text-emerald-700 underline px-1"
-                    >
-                      Other / I'd rather explain in my own words →
-                    </button>
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                      <ShieldCheck className="w-3 h-3 text-emerald-600" />
+                      Email Required to Begin
+                    </div>
+                    <h4 className="text-sm font-bold text-slate-900 mt-1.5">
+                      Please provide your email to start your consultation
+                    </h4>
+                    <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                      Marcus Sterling, CFP® requires your email to securely preserve your bespoke wealth strategy dossier and consultation notes.
+                    </p>
                   </div>
                 </div>
-              )}
 
-            {/* 3. Free Text Input Card */}
-            {(showFreeTextInput || (!latestAgentMessage.options && currentStage !== 'email_capture')) && (
-              <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-2">
-                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                  Tell Marcus in your own words...
-                </label>
-                <form onSubmit={handleSendText} className="flex gap-2">
-                  <input
-                    type="text"
-                    id="chat-free-text-input"
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    placeholder="Type your response here..."
-                    className="flex-1 px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
-                    autoFocus
-                  />
+                <form onSubmit={handleInitialEmailSubmit} className="space-y-3 pt-1">
+                  <div>
+                    <label htmlFor="required-visitor-email" className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                      Your Email Address <span className="text-emerald-600">*</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="email"
+                        id="required-visitor-email"
+                        ref={gateEmailInputRef}
+                        value={gateEmail}
+                        onChange={(e) => {
+                          setGateEmail(e.target.value);
+                          setGateError(null);
+                        }}
+                        placeholder="name@example.com"
+                        required
+                        className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-slate-300 focus:border-emerald-600 focus:ring-2 focus:ring-emerald-500/20 text-xs sm:text-sm text-slate-900 bg-slate-50/50 outline-none transition"
+                        autoFocus
+                      />
+                      <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                    {gateError && (
+                      <p className="text-[11px] text-rose-600 font-medium mt-1.5 flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        {gateError}
+                      </p>
+                    )}
+                  </div>
+
                   <button
                     type="submit"
-                    id="chat-free-text-send-btn"
-                    disabled={!inputText.trim() || isSubmitting}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold text-xs flex items-center gap-1.5 transition"
+                    id="required-email-submit-btn"
+                    disabled={isSubmittingGate || !gateEmail.trim()}
+                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm transition flex items-center justify-center gap-2 shadow-xs cursor-pointer"
                   >
-                    <span>Send</span>
+                    <span>{isSubmittingGate ? 'Verifying...' : 'Begin Consultation with Marcus'}</span>
                     <ArrowRight className="w-3.5 h-3.5" />
                   </button>
-                </form>
 
-                {latestAgentMessage.options && latestAgentMessage.options.length > 0 && (
-                  <button
-                    onClick={() => setShowFreeTextInput(false)}
-                    className="text-[11px] text-slate-400 hover:text-slate-600 underline"
-                  >
-                    ← Back to choices
-                  </button>
+                  <div className="flex items-center justify-center gap-1.5 text-[10px] text-slate-400 pt-0.5">
+                    <Lock className="w-3 h-3 text-emerald-700" />
+                    <span>FCA-compliant encryption • We strictly protect your privacy</span>
+                  </div>
+                </form>
+              </div>
+            ) : (
+              <>
+                {/* 1. Multi-Select Options if configured */}
+                {latestAgentMessage.allowMultiSelect && latestAgentMessage.options && (
+                  <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-3">
+                    <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex items-center justify-between">
+                      <span>Select all that apply</span>
+                      <span>{selectedMulti.length} selected</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {latestAgentMessage.options.map((opt) => {
+                        const isSelected = selectedMulti.includes(opt.value);
+                        return (
+                          <button
+                            key={opt.id}
+                            id={`multi-opt-${opt.id}`}
+                            onClick={() => toggleMultiSelect(opt.value)}
+                            className={`p-3 rounded-xl text-left text-xs font-semibold transition border flex items-center justify-between ${
+                              isSelected
+                                ? 'bg-emerald-50 border-emerald-500 text-emerald-950 shadow-2xs'
+                                : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            <span>{opt.label}</span>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      id="multi-select-continue-btn"
+                      onClick={handleSubmitMultiSelect}
+                      disabled={selectedMulti.length === 0}
+                      className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold text-xs transition flex items-center justify-center gap-1.5 shadow-xs"
+                    >
+                      <span>Continue</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 )}
-              </div>
-            )}
 
-            {/* 4. Email Capture Card (Stage 13) */}
-            {currentStage === 'email_capture' && (
-              <div className="p-5 bg-white rounded-2xl border border-emerald-200 shadow-xs space-y-4 max-w-lg">
-                <div>
-                  <h4 className="text-sm font-bold text-slate-900">
-                    Receive your consultation summary & planning pack
-                  </h4>
-                  <p className="text-xs text-slate-600 mt-1">
-                    Marcus will compile a structured summary of our discussion and relevant planning guides to your inbox.
-                  </p>
-                </div>
+                {/* 2. Structured Single-Choice Button Grid */}
+                {!latestAgentMessage.allowMultiSelect &&
+                  latestAgentMessage.options &&
+                  latestAgentMessage.options.length > 0 &&
+                  !showFreeTextInput && (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {latestAgentMessage.options.map((opt) => (
+                          <button
+                            key={opt.id}
+                            id={`chat-opt-btn-${opt.id}`}
+                            onClick={() => handleSelectOption(opt)}
+                            className="p-3.5 rounded-xl text-left bg-white hover:bg-emerald-50/60 border border-slate-200/90 hover:border-emerald-500/80 text-xs sm:text-sm font-semibold text-slate-800 hover:text-emerald-950 transition-all duration-150 shadow-2xs hover:shadow-xs flex items-center justify-between group active:scale-[0.99]"
+                          >
+                            <span>{opt.label}</span>
+                            <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-600 transition-colors" />
+                          </button>
+                        ))}
+                      </div>
 
-                <form onSubmit={handleEmailSubmit} className="space-y-3">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-                      Your Email Address
+                      {/* Toggle to type custom response */}
+                      <div className="text-right">
+                        <button
+                          id="type-custom-answer-toggle-btn"
+                          onClick={() => setShowFreeTextInput(true)}
+                          className="text-[11px] font-medium text-slate-500 hover:text-emerald-700 underline px-1"
+                        >
+                          Other / I'd rather explain in my own words →
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {/* 3. Free Text Input Card */}
+                {(showFreeTextInput || (!latestAgentMessage.options && currentStage !== 'email_capture')) && (
+                  <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-2">
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                      Tell Marcus in your own words...
                     </label>
-                    <input
-                      type="email"
-                      id="capture-email-input"
-                      value={emailInput}
-                      onChange={(e) => setEmailInput(e.target.value)}
-                      placeholder="you@example.com"
-                      required
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
-                    />
+                    <form onSubmit={handleSendText} className="flex gap-2">
+                      <input
+                        type="text"
+                        id="chat-free-text-input"
+                        value={inputText}
+                        onChange={(e) => setInputText(e.target.value)}
+                        placeholder="Type your response here..."
+                        className="flex-1 px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                        autoFocus
+                      />
+                      <button
+                        type="submit"
+                        id="chat-free-text-send-btn"
+                        disabled={!inputText.trim() || isSubmitting}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold text-xs flex items-center gap-1.5 transition"
+                      >
+                        <span>Send</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    </form>
+
+                    {latestAgentMessage.options && latestAgentMessage.options.length > 0 && (
+                      <button
+                        onClick={() => setShowFreeTextInput(false)}
+                        className="text-[11px] text-slate-400 hover:text-slate-600 underline"
+                      >
+                        ← Back to choices
+                      </button>
+                    )}
                   </div>
+                )}
 
-                  <div className="flex items-start gap-2 text-xs text-slate-600">
-                    <input
-                      type="checkbox"
-                      id="email-consent-cb"
-                      checked={emailConsent}
-                      onChange={(e) => setEmailConsent(e.target.checked)}
-                      className="mt-0.5 rounded text-emerald-600 focus:ring-emerald-500"
-                    />
-                    <label htmlFor="email-consent-cb" className="text-[11px]">
-                      I'd like to receive Marcus's quarterly wealth planning insights and market commentaries.
-                    </label>
+                {/* 4. Email Capture Card (Stage 13) */}
+                {currentStage === 'email_capture' && (
+                  <div className="p-5 bg-white rounded-2xl border border-emerald-200 shadow-xs space-y-4 max-w-lg">
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900">
+                        Receive your consultation summary & planning pack
+                      </h4>
+                      <p className="text-xs text-slate-600 mt-1">
+                        Marcus will compile a structured summary of our discussion and relevant planning guides to your inbox.
+                      </p>
+                    </div>
+
+                    <form onSubmit={handleEmailSubmit} className="space-y-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                          Your Email Address
+                        </label>
+                        <input
+                          type="email"
+                          id="capture-email-input"
+                          value={emailInput}
+                          onChange={(e) => setEmailInput(e.target.value)}
+                          placeholder="you@example.com"
+                          required
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                        />
+                      </div>
+
+                      <div className="flex items-start gap-2 text-xs text-slate-600">
+                        <input
+                          type="checkbox"
+                          id="email-consent-cb"
+                          checked={emailConsent}
+                          onChange={(e) => setEmailConsent(e.target.checked)}
+                          className="mt-0.5 rounded text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <label htmlFor="email-consent-cb" className="text-[11px]">
+                          I'd like to receive Marcus's quarterly wealth planning insights and market commentaries.
+                        </label>
+                      </div>
+
+                      <button
+                        type="submit"
+                        id="capture-email-submit-btn"
+                        disabled={!emailInput || isSubmitting}
+                        className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition shadow-xs"
+                      >
+                        Send my consultation summary
+                      </button>
+                    </form>
+
+                    <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                      <Lock className="w-3 h-3" />
+                      <span>Strict confidentiality • We never share your details with third parties.</span>
+                    </div>
                   </div>
-
-                  <button
-                    type="submit"
-                    id="capture-email-submit-btn"
-                    disabled={!emailInput || isSubmitting}
-                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition shadow-xs"
-                  >
-                    Send my consultation summary
-                  </button>
-                </form>
-
-                <div className="flex items-center gap-1 text-[10px] text-slate-400">
-                  <Lock className="w-3 h-3" />
-                  <span>Strict confidentiality • We never share your details with third parties.</span>
-                </div>
-              </div>
+                )}
+              </>
             )}
 
           </div>
@@ -653,23 +784,42 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
       {/* 4. Bottom Free Inquiry Bar */}
       <div className="bg-white border-t border-slate-200 px-4 sm:px-6 py-3 sticky bottom-0 z-20">
-        <form onSubmit={handleSendText} className="max-w-4xl mx-auto flex items-center gap-2">
+        <form
+          onSubmit={(e) => {
+            if (!hasEmail) {
+              e.preventDefault();
+              promptForEmail();
+              return;
+            }
+            handleSendText(e);
+          }}
+          className="max-w-4xl mx-auto flex items-center gap-2"
+        >
           <input
             type="text"
             id="chat-bottom-inquiry-input"
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
-            placeholder="Ask Marcus a question or explain your circumstances..."
+            onFocus={() => {
+              if (!hasEmail) {
+                promptForEmail();
+              }
+            }}
+            placeholder={
+              hasEmail
+                ? "Ask Marcus a question or explain your circumstances..."
+                : "Please enter your email above to unlock the conversation..."
+            }
             disabled={isSubmitting}
             className="flex-1 px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs sm:text-sm focus:outline-hidden focus:ring-1 focus:ring-emerald-500 text-slate-800"
           />
           <button
             type="submit"
             id="chat-bottom-send-btn"
-            disabled={!inputText.trim() || isSubmitting}
-            className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white font-semibold text-xs sm:text-sm transition flex items-center gap-1.5 shadow-xs"
+            disabled={isSubmitting || (hasEmail && !inputText.trim())}
+            className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white font-semibold text-xs sm:text-sm transition flex items-center gap-1.5 shadow-xs cursor-pointer"
           >
-            <span>Send</span>
+            <span>{hasEmail ? 'Send' : 'Email Required'}</span>
             <Send className="w-3.5 h-3.5" />
           </button>
         </form>
