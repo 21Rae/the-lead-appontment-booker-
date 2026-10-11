@@ -6,7 +6,15 @@ import { db } from './server/db';
 import { conversationEngine } from './server/engine';
 import { APPROVED_EDUCATIONAL_TOPICS } from './server/knowledge';
 import { generateAdviserSummary } from './server/gemini';
-import { testSupabaseConnection, syncLeadSubmissionToSupabase, syncConsultationToSupabase } from './server/supabase';
+import {
+  sendConsultationBookingToTelegram,
+  sendEmailGateToTelegram,
+  sendLeadProfileUpdateToTelegram,
+  startTelegramAutoDiscovery,
+  getTelegramBotStatus,
+  addManualChatId,
+  sendTelegramMessage
+} from './server/telegram';
 
 dotenv.config();
 
@@ -16,6 +24,10 @@ async function startServer() {
   const app = express();
 
   app.use(express.json());
+
+  // Start background polling to automatically discover the user's Telegram chat_id
+  // the moment they tap Start or message @MattStrategybot
+  startTelegramAutoDiscovery();
 
   // Periodically sweep abandoned conversations (every 5 mins)
   setInterval(() => {
@@ -29,17 +41,48 @@ async function startServer() {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Supabase connection status check
-  app.get('/api/supabase/status', async (req, res) => {
+  // Telegram Bot Status & Instant Connect Endpoints
+  app.get('/api/telegram/status', async (req, res) => {
     try {
-      const status = await testSupabaseConnection();
+      const status = await getTelegramBotStatus();
       res.json(status);
     } catch (err: any) {
-      res.status(500).json({
-        connected: false,
-        configured: false,
-        error: err.message
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/telegram/connect', async (req, res) => {
+    try {
+      const { chatId } = req.body || {};
+      if (chatId) {
+        const result = await addManualChatId(String(chatId));
+        const status = await getTelegramBotStatus();
+        return res.json({ ...result, status });
+      }
+      const status = await getTelegramBotStatus();
+      res.json({ ok: status.connected, status });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/api/telegram/test', async (req, res) => {
+    try {
+      const testText = [
+        `🔔 <b>TEST MESSAGE FROM MATT STRATEGY APP</b>`,
+        `━━━━━━━━━━━━━━━━━━━━━━`,
+        `✅ Your Telegram Bot is connected and delivering form outputs!`,
+        `🕒 <i>Sent: ${new Date().toUTCString()}</i>`
+      ].join('\n');
+      const sent = await sendTelegramMessage(testText);
+      const status = await getTelegramBotStatus();
+      res.json({
+        ok: sent,
+        status,
+        error: sent ? undefined : `Waiting for you to open @${status.botUsername || 'MattStrategybot'} in Telegram and tap Start.`
       });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
     }
   });
 
@@ -98,8 +141,8 @@ async function startServer() {
     }
   });
 
-  // Email capture: updates visitor record and immediately syncs to Supabase lead_submissions
-  app.post('/api/visitors/:id/email', (req, res) => {
+  // Email capture: updates visitor record and sends form output to Telegram Bot
+  app.post('/api/visitors/:id/email', async (req, res) => {
     try {
       const { email, first_name, last_name, phone, conversation_id } = req.body;
       const visitor = db.getVisitor(req.params.id) || db.getOrCreateVisitor({ visitor_id: req.params.id });
@@ -111,13 +154,16 @@ async function startServer() {
         phone: phone || visitor.phone
       }) || visitor;
 
-      if (conversation_id) {
-        const conv = db.getConversation(conversation_id) || db.getOrCreateConversation({
-          visitor_id: visitor.visitor_id,
-          conversation_id
-        });
-        const answers = db.getConversationAnswers(conversation_id);
-        syncLeadSubmissionToSupabase({ visitor: updatedVisitor, conversation: conv, answers }).catch(() => {});
+      let telegramSent = false;
+      if (email) {
+        telegramSent = await sendEmailGateToTelegram({
+          email,
+          first_name: first_name || updatedVisitor.first_name,
+          last_name: last_name || updatedVisitor.last_name,
+          phone: phone || updatedVisitor.phone,
+          source: updatedVisitor.source,
+          campaign: updatedVisitor.campaign
+        }).catch(() => false);
       }
 
       db.logEvent({
@@ -127,7 +173,7 @@ async function startServer() {
         event_data: { email, first_name, last_name }
       });
 
-      res.json({ success: true, visitor: updatedVisitor });
+      res.json({ success: true, visitor: updatedVisitor, telegramSent });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -214,8 +260,17 @@ async function startServer() {
         submission_id
       });
 
+      const visitor = db.getVisitor(visitor_id);
+      const telegramSent = await sendLeadProfileUpdateToTelegram({
+        visitor,
+        conversation: result.conversation,
+        answers: result.answers,
+        latestAnswer: result.answer
+      }).catch(() => false);
+
       res.json({
         success: true,
+        telegramSent,
         ...result
       });
     } catch (err: any) {
@@ -238,8 +293,18 @@ async function startServer() {
         userText: text
       });
 
+      const visitor = db.getVisitor(visitor_id);
+      const answers = db.getConversationAnswers(req.params.id);
+      const telegramSent = await sendLeadProfileUpdateToTelegram({
+        visitor,
+        conversation: result.conversation,
+        answers,
+        freeTextMessage: text
+      }).catch(() => false);
+
       res.json({
         success: true,
+        telegramSent,
         ...result
       });
     } catch (err: any) {
@@ -296,22 +361,21 @@ async function startServer() {
       if (!conv) return res.status(404).json({ error: 'Conversation not found' });
 
       const visitor = db.getVisitor(conv.visitor_id);
-      const bookingEmail = email || visitor?.email;
+      const bookingEmail = email || visitor?.email || 'Not provided';
       const bookingName = full_name || [first_name || visitor?.first_name, last_name || visitor?.last_name].filter(Boolean).join(' ') || visitor?.first_name;
       const bookingPhone = phone || visitor?.phone;
 
-      // Sync to consultations table in Supabase
-      if (bookingEmail) {
-        await syncConsultationToSupabase({
-          email: bookingEmail,
-          full_name: bookingName || undefined,
-          phone: bookingPhone || undefined,
-          selected_time_slot: slot || 'Thursday, 11:00 AM (BST)',
-          consultant_name: adviser_name || 'Marcus Sterling, CFP®',
-          consultation_type: '20-minute video discovery call',
-          conversation_id: conv.conversation_id
-        }).catch(() => {});
-      }
+      const allAnswers = db.getConversationAnswers(conv.conversation_id);
+      const telegramSent = await sendConsultationBookingToTelegram({
+        email: bookingEmail,
+        full_name: bookingName || undefined,
+        phone: bookingPhone || undefined,
+        selected_time_slot: slot || 'Thursday, 11:00 AM (BST)',
+        consultant_name: adviser_name || 'Marcus Sterling, CFP®',
+        consultation_type: '20-minute video discovery call',
+        conversation_id: conv.conversation_id,
+        answers: allAnswers
+      }).catch(() => false);
 
       db.logEvent({
         visitor_id: conv.visitor_id,
@@ -329,7 +393,7 @@ async function startServer() {
         text: `🎉 **Discovery Consultation Confirmed**\n\nYour 20-minute introductory session has been scheduled for **${slot || 'Thursday at 11:00 AM'}**.\n\nA calendar invitation and pre-meeting briefing have been prepared for your adviser with your goal summary.`
       });
 
-      res.json({ success: true, conversation: conv, message: confirmMsg });
+      res.json({ success: true, conversation: conv, message: confirmMsg, telegramSent });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

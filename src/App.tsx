@@ -37,7 +37,15 @@ import {
   processClientFreeText,
   clientStore
 } from './lib/clientFallbackEngine';
-import { logConsultationToSupabase } from './lib/supabase';
+import {
+  notifyTelegramConsultationBooking,
+  notifyTelegramEmailCaptured,
+  notifyTelegramFormAnswer,
+  fetchTelegramConnectionStatus,
+  connectManualTelegramChatId,
+  triggerTestTelegramPing,
+  TelegramConnectionStatus
+} from './lib/telegram';
 import { LandingHero } from './components/LandingHero';
 import { GoalCardsSection } from './components/GoalCardsSection';
 import { ChatInterface } from './components/ChatInterface';
@@ -65,8 +73,27 @@ export default function App() {
   const [isBookingOpen, setIsBookingOpen] = useState(false);
   const [selectedEduTopic, setSelectedEduTopic] = useState<string | undefined>();
 
+  // Telegram Bot live connection state
+  const [telegramStatus, setTelegramStatus] = useState<TelegramConnectionStatus | null>(null);
+  const [manualChatId, setManualChatId] = useState('');
+  const [telegramNotice, setTelegramNotice] = useState<string | null>(null);
+  const [hideConnectedBanner, setHideConnectedBanner] = useState(false);
+
   // Current tracking attribution
   const [tracking, setTracking] = useState(extractTrackingParams());
+
+  const refreshTelegramStatus = useCallback(async () => {
+    const status = await fetchTelegramConnectionStatus();
+    setTelegramStatus(status);
+  }, []);
+
+  useEffect(() => {
+    refreshTelegramStatus();
+    const timer = setInterval(() => {
+      refreshTelegramStatus();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [refreshTelegramStatus]);
 
   // Initialize or resume conversation session
   const initSession = useCallback(async (forcedVisitorId?: string, overrideTracking?: any) => {
@@ -180,6 +207,18 @@ export default function App() {
           const data = await res.json();
           setConversation(data.conversation);
           setAnswers(data.answers);
+          if (!data.telegramSent) {
+            notifyTelegramFormAnswer({
+              visitor,
+              conversation: data.conversation,
+              answers: data.answers,
+              latestAnswer: {
+                question_id: params.question_id,
+                question_text: params.question_text,
+                answer_label: params.raw_answer || params.answer_label || params.answer_value
+              }
+            });
+          }
           setMessages((prev) => [
             ...prev,
             {
@@ -215,6 +254,16 @@ export default function App() {
 
     setConversation(fallbackRes.conversation);
     setAnswers(fallbackRes.answers);
+    notifyTelegramFormAnswer({
+      visitor,
+      conversation: fallbackRes.conversation,
+      answers: fallbackRes.answers,
+      latestAnswer: {
+        question_id: params.question_id,
+        question_text: params.question_text,
+        answer_label: params.raw_answer || params.answer_label || params.answer_value
+      }
+    });
     setMessages((prev) => [
       ...prev,
       {
@@ -247,6 +296,14 @@ export default function App() {
         const contentType = res.headers.get('content-type');
         if (contentType && contentType.includes('application/json')) {
           const data = await res.json();
+          if (!data.telegramSent) {
+            notifyTelegramFormAnswer({
+              visitor,
+              conversation,
+              answers,
+              freeTextMessage: text
+            });
+          }
           setMessages((prev) => [
             ...prev,
             data.userMessage,
@@ -264,6 +321,13 @@ export default function App() {
       visitor_id: visitor.visitor_id,
       conversation_id: conversation.conversation_id,
       text
+    });
+
+    notifyTelegramFormAnswer({
+      visitor,
+      conversation,
+      answers,
+      freeTextMessage: text
     });
 
     setMessages((prev) => [
@@ -317,6 +381,15 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setVisitor(data.visitor);
+        if (!data.telegramSent) {
+          notifyTelegramEmailCaptured({
+            email,
+            first_name: firstName || visitor.first_name,
+            phone: visitor.phone,
+            source: visitor.source,
+            campaign: visitor.campaign
+          });
+        }
         return;
       }
     } catch {
@@ -330,6 +403,13 @@ export default function App() {
     };
     setVisitor(updatedVisitor);
     clientStore.saveVisitor(updatedVisitor);
+    notifyTelegramEmailCaptured({
+      email,
+      first_name: firstName || visitor.first_name,
+      phone: visitor.phone,
+      source: visitor.source,
+      campaign: visitor.campaign
+    });
   };
 
   // Confirm booking
@@ -341,17 +421,6 @@ export default function App() {
 
     // Update visitor email first
     await handleCaptureEmail(details.email, details.firstName);
-
-    // Sync consultation directly
-    logConsultationToSupabase({
-      email: details.email,
-      full_name: details.firstName,
-      phone: details.phone,
-      selected_time_slot: slot,
-      consultant_name: 'Marcus Sterling, CFP®',
-      consultation_type: '20-minute video discovery call',
-      conversation_id: conversation.conversation_id
-    });
 
     try {
       const res = await fetch(`/api/conversations/${conversation.conversation_id}/booking`, {
@@ -369,6 +438,18 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setConversation(data.conversation);
+        if (!data.telegramSent) {
+          notifyTelegramConsultationBooking({
+            email: details.email,
+            full_name: details.firstName,
+            phone: details.phone,
+            selected_time_slot: slot,
+            consultant_name: 'Marcus Sterling, CFP®',
+            consultation_type: '20-minute video discovery call',
+            conversation_id: conversation.conversation_id,
+            answers
+          });
+        }
         if (data.message) {
           setMessages((prev) => [...prev, data.message]);
         }
@@ -377,6 +458,18 @@ export default function App() {
     } catch {
       // Local fallback
     }
+
+    // Fallback: send consultation booking directly to Telegram from client if backend API is unavailable
+    notifyTelegramConsultationBooking({
+      email: details.email,
+      full_name: details.firstName,
+      phone: details.phone,
+      selected_time_slot: slot,
+      consultant_name: 'Marcus Sterling, CFP®',
+      consultation_type: '20-minute video discovery call',
+      conversation_id: conversation.conversation_id,
+      answers
+    });
 
     const updatedConv = {
       ...conversation,
@@ -467,6 +560,115 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Telegram Bot Activation Banner (shown when Bot Token is valid but Telegram hasn't received /start from user yet) */}
+      {telegramStatus?.configured && !telegramStatus.connected && (
+        <div className="bg-amber-500/15 border-b border-amber-500/30 px-4 sm:px-6 py-3 text-slate-900">
+          <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
+                <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                <span>
+                  One-Time Telegram Bot Activation Required (@{telegramStatus.botUsername || 'MattStrategybot'})
+                </span>
+                {telegramStatus.queuedCount > 0 && (
+                  <span className="px-2 py-0.5 rounded bg-amber-900 text-amber-100 text-[10px] font-semibold">
+                    {telegramStatus.queuedCount} submission{telegramStatus.queuedCount === 1 ? '' : 's'} queued & ready to send
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-amber-900/90">
+                Telegram bots cannot message you until you press <strong>Start</strong> or send 1 message (e.g. <code>hi</code>) to{' '}
+                <strong>@{telegramStatus.botUsername || 'MattStrategybot'}</strong> in Telegram so Telegram reveals your Chat ID. As soon as you send a message, all queued form outputs will arrive automatically.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <a
+                href={`https://t.me/${telegramStatus.botUsername || 'MattStrategybot'}?start=connect`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-xs transition"
+              >
+                <span>1. Open @{telegramStatus.botUsername || 'MattStrategybot'} &amp; Tap Start</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={manualChatId}
+                  onChange={(e) => setManualChatId(e.target.value)}
+                  placeholder="Or Chat ID / @channel"
+                  className="px-2.5 py-1.5 rounded-lg border border-amber-400/60 bg-white text-xs text-slate-800 w-36 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (manualChatId.trim()) {
+                      const res = await connectManualTelegramChatId(manualChatId);
+                      if (!res.ok) {
+                        setTelegramNotice(res.error || 'Could not connect Chat ID.');
+                      } else {
+                        setTelegramNotice('Connected! Queued form outputs sent to Telegram.');
+                        setManualChatId('');
+                      }
+                    }
+                    await refreshTelegramStatus();
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition cursor-pointer"
+                >
+                  Connect
+                </button>
+              </div>
+            </div>
+          </div>
+          {telegramNotice && (
+            <div className="max-w-7xl mx-auto mt-1.5 text-[11px] font-medium text-amber-950">
+              {telegramNotice}
+            </div>
+          )}
+        </div>
+      )}
+
+      {telegramStatus?.configured && telegramStatus.connected && !hideConnectedBanner && (
+        <div className="bg-emerald-950 text-emerald-100 border-b border-emerald-800 px-4 sm:px-6 py-2">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />
+              <span>
+                Connected to <strong>@{telegramStatus.botUsername || 'MattStrategybot'}</strong> (Chat ID:{' '}
+                <code>{telegramStatus.chatIds.join(', ')}</code>) — All form outputs are being delivered live to Telegram.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await triggerTestTelegramPing();
+                  setTelegramNotice(res.ok ? 'Test message delivered to Telegram!' : res.error || 'Failed');
+                  setTimeout(() => setTelegramNotice(null), 4000);
+                }}
+                className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold transition cursor-pointer"
+              >
+                Send Test Message
+              </button>
+              <button
+                type="button"
+                onClick={() => setHideConnectedBanner(true)}
+                className="text-emerald-300 hover:text-white text-[11px] px-1.5 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+          {telegramNotice && (
+            <div className="max-w-7xl mx-auto mt-1 text-[11px] text-emerald-300">
+              {telegramNotice}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col overflow-hidden relative">

@@ -25,7 +25,6 @@ import {
 } from 'lucide-react';
 import { Visitor, Conversation, ConversationAnswer, ConversationEvent, ChatMessage } from '../types';
 import { getClientCRMData, clientStore } from '../lib/clientFallbackEngine';
-import { checkSupabaseStatus } from '../lib/supabase';
 
 interface EnrichedVisitor extends Visitor {
   conversations_count: number;
@@ -58,11 +57,6 @@ export const AdminCRMView: React.FC = () => {
   const [campaignFilter, setCampaignFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
-  const [supabaseStatus, setSupabaseStatus] = useState<{
-    configured: boolean;
-    connected: boolean;
-    message: string;
-  } | null>(null);
 
   const fetchCRMData = async () => {
     setIsLoading(true);
@@ -99,7 +93,6 @@ export const AdminCRMView: React.FC = () => {
 
   useEffect(() => {
     fetchCRMData();
-    checkSupabaseStatus().then((status) => setSupabaseStatus(status));
   }, []);
 
   // Fetch messages when selected visitor changes
@@ -166,28 +159,6 @@ export const AdminCRMView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Supabase Status Pill */}
-          <div
-            id="supabase-status-pill"
-            className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 border ${
-              supabaseStatus?.connected
-                ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/50'
-                : supabaseStatus?.configured
-                ? 'bg-amber-950/80 text-amber-300 border-amber-700/50'
-                : 'bg-slate-800 text-slate-400 border-slate-700'
-            }`}
-            title={supabaseStatus?.message || 'Checking Supabase connection...'}
-          >
-            <Database className="w-3.5 h-3.5 text-emerald-400" />
-            <span>
-              {supabaseStatus?.connected
-                ? 'Supabase Connected'
-                : supabaseStatus?.configured
-                ? 'Supabase Configured'
-                : 'Supabase Ready (Set Keys in .env)'}
-            </span>
-          </div>
-
           <button
             id="crm-refresh-btn"
             onClick={fetchCRMData}

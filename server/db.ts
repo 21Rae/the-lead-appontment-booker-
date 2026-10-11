@@ -11,14 +11,6 @@ import {
   QualificationStatus,
   NextAction
 } from '../src/types';
-import {
-  syncVisitorToSupabase,
-  syncConversationToSupabase,
-  syncAnswerToSupabase,
-  syncMessageToSupabase,
-  syncEventToSupabase,
-  syncLeadSubmissionToSupabase
-} from './supabase';
 
 interface DatabaseSchema {
   visitors: Record<string, Visitor>;
@@ -213,7 +205,6 @@ class RelationalDB {
       if (params.content && !existing.content) existing.content = params.content;
       if (params.landing_page && !existing.landing_page) existing.landing_page = params.landing_page;
       this.save();
-      syncVisitorToSupabase(existing).catch(() => {});
       return existing;
     }
 
@@ -234,7 +225,6 @@ class RelationalDB {
 
     this.data.visitors[params.visitor_id] = newVisitor;
     this.save();
-    syncVisitorToSupabase(newVisitor).catch(() => {});
     return newVisitor;
   }
 
@@ -251,15 +241,6 @@ class RelationalDB {
     });
 
     this.save();
-    syncVisitorToSupabase(visitor).catch(() => {});
-
-    // Sync any active conversations for this visitor to lead_submissions
-    const convs = Object.values(this.data.conversations).filter((c) => c.visitor_id === visitor_id);
-    for (const conv of convs) {
-      const answers = this.getConversationAnswers(conv.conversation_id);
-      syncLeadSubmissionToSupabase({ visitor, conversation: conv, answers }).catch(() => {});
-    }
-
     return visitor;
   }
 
@@ -310,7 +291,6 @@ class RelationalDB {
         activeOrPaused.status = 'active';
       }
       this.save();
-      syncConversationToSupabase(activeOrPaused).catch(() => {});
       return activeOrPaused;
     }
 
@@ -345,7 +325,6 @@ class RelationalDB {
     });
 
     this.save();
-    syncConversationToSupabase(newConv).catch(() => {});
     return newConv;
   }
 
@@ -378,13 +357,6 @@ class RelationalDB {
     });
 
     this.save();
-    syncConversationToSupabase(conv).catch(() => {});
-
-    // Sync updated conversation state to lead_submissions
-    const visitor = this.getVisitor(conv.visitor_id);
-    const answers = this.getConversationAnswers(conversation_id);
-    syncLeadSubmissionToSupabase({ visitor, conversation: conv, answers }).catch(() => {});
-
     return conv;
   }
 
@@ -417,14 +389,6 @@ class RelationalDB {
       existing.stage = answer.stage;
       existing.updated_at = now;
       this.save();
-      syncAnswerToSupabase(existing).catch(() => {});
-
-      // Sync updated answers to dedicated columns in lead_submissions
-      const visitor = this.getVisitor(answer.visitor_id);
-      const conv = this.getConversation(answer.conversation_id);
-      const allAnswers = this.getConversationAnswers(answer.conversation_id);
-      syncLeadSubmissionToSupabase({ visitor, conversation: conv, answers: allAnswers }).catch(() => {});
-
       return existing;
     }
 
@@ -467,13 +431,6 @@ class RelationalDB {
     }
 
     this.save();
-    syncAnswerToSupabase(newAnswer).catch(() => {});
-
-    // Sync immediate answer to dedicated column in lead_submissions
-    const visitor = this.getVisitor(answer.visitor_id);
-    const allAnswers = this.getConversationAnswers(answer.conversation_id);
-    syncLeadSubmissionToSupabase({ visitor, conversation: conv, answers: allAnswers }).catch(() => {});
-
     return newAnswer;
   }
 
@@ -529,7 +486,6 @@ class RelationalDB {
     }
 
     this.save();
-    syncMessageToSupabase(newMsg).catch(() => {});
     return newMsg;
   }
 
@@ -557,7 +513,6 @@ class RelationalDB {
 
     this.data.events.push(newEvent);
     this.save();
-    syncEventToSupabase(newEvent).catch(() => {});
     return newEvent;
   }
 
