@@ -2,30 +2,34 @@ const CHAT_IDS_STORAGE_KEY = 'matt_strategy_telegram_chat_ids';
 const QUEUE_STORAGE_KEY = 'matt_strategy_telegram_queue';
 const BOT_INFO_STORAGE_KEY = 'matt_strategy_telegram_bot_info';
 
-const DEFAULT_OWNER_CHAT_IDS = ['8808224123'];
-const knownClientChatIds = new Set<string>(DEFAULT_OWNER_CHAT_IDS);
+export const AUTHORIZED_TELEGRAM_USERNAME = 'TokenPockeit';
+let clientAuthorizedChatId: string | null = null;
+const knownClientChatIds = new Set<string>();
 
 function loadStoredChatIds(): string[] {
-  DEFAULT_OWNER_CHAT_IDS.forEach((id) => knownClientChatIds.add(id));
   try {
     const stored = localStorage.getItem(CHAT_IDS_STORAGE_KEY);
     if (stored) {
       const parsed = JSON.parse(stored);
-      if (Array.isArray(parsed)) {
-        parsed.forEach((id) => {
-          if (id) knownClientChatIds.add(String(id));
-        });
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        clientAuthorizedChatId = parsed[0];
+        return [parsed[0]];
       }
     }
   } catch {
     // ignore
   }
-  return Array.from(knownClientChatIds);
+  return clientAuthorizedChatId ? [clientAuthorizedChatId] : [];
 }
 
-function saveStoredChatIds() {
+function saveStoredChatIds(chatId?: string | null) {
   try {
-    localStorage.setItem(CHAT_IDS_STORAGE_KEY, JSON.stringify(Array.from(knownClientChatIds)));
+    if (chatId) {
+      clientAuthorizedChatId = chatId;
+      localStorage.setItem(CHAT_IDS_STORAGE_KEY, JSON.stringify([chatId]));
+    } else {
+      localStorage.removeItem(CHAT_IDS_STORAGE_KEY);
+    }
   } catch {
     // ignore
   }
@@ -125,6 +129,12 @@ function extractChatId(update: any): string | null {
 }
 
 async function sendDirectClientMessage(token: string, chatId: string, text: string): Promise<boolean> {
+  // CRITICAL PRIVACY GUARD: Only allow dispatch to the verified @TokenPockeit account
+  if (!clientAuthorizedChatId || chatId !== clientAuthorizedChatId) {
+    console.warn(`[Security] Blocked client attempt to send to unauthorized chat ID: ${chatId}. Locked to @${AUTHORIZED_TELEGRAM_USERNAME}`);
+    return false;
+  }
+
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
@@ -143,20 +153,16 @@ async function sendDirectClientMessage(token: string, chatId: string, text: stri
 }
 
 export async function flushClientQueue(token: string): Promise<void> {
-  const chatIds = loadStoredChatIds();
+  if (!clientAuthorizedChatId) return;
   const queue = getClientQueue();
-  if (chatIds.length === 0 || queue.length === 0) return;
+  if (queue.length === 0) return;
 
   saveClientQueue([]);
   const failed: string[] = [];
 
   for (const msg of queue) {
-    let delivered = false;
-    for (const chatId of chatIds) {
-      const ok = await sendDirectClientMessage(token, chatId, msg);
-      if (ok) delivered = true;
-    }
-    if (!delivered) failed.push(msg);
+    const ok = await sendDirectClientMessage(token, clientAuthorizedChatId, msg);
+    if (!ok) failed.push(msg);
   }
 
   if (failed.length > 0) {
@@ -165,67 +171,30 @@ export async function flushClientQueue(token: string): Promise<void> {
 }
 
 /**
- * Automatically discovers all active chats on the bot using ONLY the bot token.
+ * Automatically discovers active chat for @TokenPockeit using the bot token.
+ * Prevents non-authorized chats from ever receiving responses.
  */
 export async function discoverClientBotChatIds(token?: string | null): Promise<string[]> {
   loadStoredChatIds();
   const activeToken = token || getClientTelegramToken();
-  if (!activeToken) return Array.from(knownClientChatIds);
-
-  const newlyDiscovered: string[] = [];
+  if (!activeToken) return clientAuthorizedChatId ? [clientAuthorizedChatId] : [];
 
   try {
     const res = await fetch(`https://api.telegram.org/bot${activeToken}/getUpdates?limit=100`);
     const data: any = await res.json().catch(() => null);
-    if (data?.ok && Array.isArray(data.result)) {
-      for (const update of data.result) {
-        const chatId = extractChatId(update);
-        if (chatId && !knownClientChatIds.has(chatId)) {
-          knownClientChatIds.add(chatId);
-          newlyDiscovered.push(chatId);
-        }
-      }
-    } else if (data?.error_code === 409) {
+    if (data?.error_code === 409) {
       await fetch(`https://api.telegram.org/bot${activeToken}/deleteWebhook`);
-      const retryRes = await fetch(`https://api.telegram.org/bot${activeToken}/getUpdates?limit=100`);
-      const retryData: any = await retryRes.json().catch(() => null);
-      if (retryData?.ok && Array.isArray(retryData.result)) {
-        for (const update of retryData.result) {
-          const chatId = extractChatId(update);
-          if (chatId && !knownClientChatIds.has(chatId)) {
-            knownClientChatIds.add(chatId);
-            newlyDiscovered.push(chatId);
-          }
-        }
-      }
+      await fetch(`https://api.telegram.org/bot${activeToken}/getUpdates?limit=100`);
     }
   } catch (err) {
     console.warn('Telegram client getUpdates auto-discovery error:', err);
   }
 
-  if (newlyDiscovered.length > 0) {
-    saveStoredChatIds();
-    const botInfo = await getClientBotInfo(activeToken);
-    for (const chatId of newlyDiscovered) {
-      await sendDirectClientMessage(
-        activeToken,
-        chatId,
-        [
-          `✅ <b>Matt Strategy Bot Connected!</b>`,
-          `━━━━━━━━━━━━━━━━━━━━━━`,
-          `🤖 <b>Bot:</b> @${botInfo.username}`,
-          `🆔 <b>Linked Chat ID:</b> <code>${chatId}</code>`,
-          `📬 All live form submissions and consultation bookings will now be delivered here.`
-        ].join('\n')
-      );
-    }
-  }
-
-  if (knownClientChatIds.size > 0 && getClientQueue().length > 0) {
+  if (clientAuthorizedChatId && getClientQueue().length > 0) {
     await flushClientQueue(activeToken);
   }
 
-  return Array.from(knownClientChatIds);
+  return clientAuthorizedChatId ? [clientAuthorizedChatId] : [];
 }
 
 export interface TelegramConnectionStatus {
@@ -234,6 +203,10 @@ export interface TelegramConnectionStatus {
   botFirstName: string | null;
   connected: boolean;
   chatIds: string[];
+  authorizedUsername?: string;
+  ownerChatId?: string | null;
+  ownerUsername?: string;
+  isPrivateRestricted?: boolean;
   queuedCount: number;
 }
 
@@ -245,23 +218,26 @@ export async function fetchTelegramConnectionStatus(): Promise<TelegramConnectio
       const contentType = res.headers.get('content-type');
       if (contentType && contentType.includes('application/json')) {
         const serverStatus: TelegramConnectionStatus = await res.json();
-        // Sync any server-discovered chatIds into client localStorage too
-        if (Array.isArray(serverStatus.chatIds) && serverStatus.chatIds.length > 0) {
-          serverStatus.chatIds.forEach((id) => knownClientChatIds.add(String(id)));
-          saveStoredChatIds();
-          const token = getClientTelegramToken();
-          if (token && getClientQueue().length > 0) {
-            await flushClientQueue(token);
-          }
+        if (serverStatus.ownerChatId) {
+          saveStoredChatIds(serverStatus.ownerChatId);
         }
+
+        const token = getClientTelegramToken();
+        if (token && clientAuthorizedChatId && getClientQueue().length > 0) {
+          await flushClientQueue(token);
+        }
+
         return {
           ...serverStatus,
+          authorizedUsername: AUTHORIZED_TELEGRAM_USERNAME,
+          ownerUsername: AUTHORIZED_TELEGRAM_USERNAME,
+          isPrivateRestricted: true,
           queuedCount: Math.max(serverStatus.queuedCount || 0, getClientQueue().length)
         };
       }
     }
   } catch {
-    // Fallback to client-side check (e.g. on Vercel static hosting)
+    // Fallback to client-side check
   }
 
   const token = getClientTelegramToken();
@@ -272,26 +248,33 @@ export async function fetchTelegramConnectionStatus(): Promise<TelegramConnectio
       botFirstName: null,
       connected: false,
       chatIds: [],
+      authorizedUsername: AUTHORIZED_TELEGRAM_USERNAME,
+      ownerChatId: null,
+      ownerUsername: AUTHORIZED_TELEGRAM_USERNAME,
+      isPrivateRestricted: true,
       queuedCount: getClientQueue().length
     };
   }
 
   const botInfo = await getClientBotInfo(token);
-  const chatIds = await discoverClientBotChatIds(token);
 
   return {
     configured: true,
     botUsername: botInfo.username,
     botFirstName: botInfo.firstName,
-    connected: chatIds.length > 0,
-    chatIds,
+    connected: !!clientAuthorizedChatId,
+    chatIds: clientAuthorizedChatId ? [clientAuthorizedChatId] : [],
+    authorizedUsername: AUTHORIZED_TELEGRAM_USERNAME,
+    ownerChatId: clientAuthorizedChatId,
+    ownerUsername: AUTHORIZED_TELEGRAM_USERNAME,
+    isPrivateRestricted: true,
     queuedCount: getClientQueue().length
   };
 }
 
 export async function connectManualTelegramChatId(chatIdInput: string): Promise<{ ok: boolean; error?: string }> {
   const cleanId = chatIdInput.trim();
-  if (!cleanId) return { ok: false, error: 'Please enter a valid Chat ID or @channel.' };
+  if (!cleanId) return { ok: false, error: `Please enter Chat ID or @${AUTHORIZED_TELEGRAM_USERNAME}.` };
 
   try {
     const res = await fetch('/api/telegram/connect', {
@@ -304,10 +287,11 @@ export async function connectManualTelegramChatId(chatIdInput: string): Promise<
       if (contentType && contentType.includes('application/json')) {
         const data = await res.json();
         if (data.ok) {
-          knownClientChatIds.add(cleanId);
-          saveStoredChatIds();
+          if (data.status?.ownerChatId) {
+            saveStoredChatIds(data.status.ownerChatId);
+          }
           const token = getClientTelegramToken();
-          if (token) await flushClientQueue(token);
+          if (token && clientAuthorizedChatId) await flushClientQueue(token);
           return { ok: true };
         }
         return { ok: false, error: data.error };
@@ -317,31 +301,10 @@ export async function connectManualTelegramChatId(chatIdInput: string): Promise<
     // Fallback to client direct
   }
 
-  const token = getClientTelegramToken();
-  if (!token) return { ok: false, error: 'Bot token is not configured.' };
-
-  const ok = await sendDirectClientMessage(
-    token,
-    cleanId,
-    [
-      `✅ <b>Matt Strategy Bot Connected!</b>`,
-      `━━━━━━━━━━━━━━━━━━━━━━`,
-      `🆔 <b>Linked Chat:</b> <code>${escapeHtml(cleanId)}</code>`,
-      `📬 Form outputs will now be delivered here immediately.`
-    ].join('\n')
-  );
-
-  if (!ok) {
-    return {
-      ok: false,
-      error: `Could not message "${cleanId}". Please tap Start on @MattStrategybot in Telegram first.`
-    };
-  }
-
-  knownClientChatIds.add(cleanId);
-  saveStoredChatIds();
-  await flushClientQueue(token);
-  return { ok: true };
+  return {
+    ok: false,
+    error: `Please open @MattStrategybot in Telegram from your @${AUTHORIZED_TELEGRAM_USERNAME} account and tap Start.`
+  };
 }
 
 export async function triggerTestTelegramPing(): Promise<{ ok: boolean; error?: string }> {

@@ -6,7 +6,20 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const STATE_FILE = path.join(DATA_DIR, 'telegram_state.json');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
+// The only Telegram username the bot is authorized to interact with and deliver responses to
+export const AUTHORIZED_TELEGRAM_USERNAME = (
+  process.env.TELEGRAM_AUTHORIZED_USERNAME || 'TokenPockeit'
+).trim().replace(/^@/, '');
+
+export function isAuthorizedUsername(username?: string | null): boolean {
+  if (!username) return false;
+  const clean = username.trim().replace(/^@/, '').toLowerCase();
+  return clean === AUTHORIZED_TELEGRAM_USERNAME.toLowerCase();
+}
+
 interface TelegramPersistedState {
+  authorizedUsername: string;
+  authorizedChatId: string | null;
   chatIds: string[];
   botUsername: string | null;
   botFirstName: string | null;
@@ -14,12 +27,12 @@ interface TelegramPersistedState {
   seededInitialDbSubmission: boolean;
 }
 
-const DEFAULT_OWNER_CHAT_IDS = ['8808224123'];
-
 const state: TelegramPersistedState = {
-  chatIds: [...DEFAULT_OWNER_CHAT_IDS],
+  authorizedUsername: AUTHORIZED_TELEGRAM_USERNAME,
+  authorizedChatId: null,
+  chatIds: [],
   botUsername: 'MattStrategybot',
-  botFirstName: 'Matt Strategy bot',
+  botFirstName: 'Matt Strategy PFA',
   pendingQueue: [],
   seededInitialDbSubmission: false
 };
@@ -32,9 +45,9 @@ function loadState() {
     if (fs.existsSync(STATE_FILE)) {
       const raw = fs.readFileSync(STATE_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed.chatIds)) {
-        state.chatIds = Array.from(new Set([...DEFAULT_OWNER_CHAT_IDS, ...parsed.chatIds.map(String)]));
-      }
+      state.authorizedUsername = AUTHORIZED_TELEGRAM_USERNAME;
+      state.authorizedChatId = parsed.authorizedChatId || null;
+      state.chatIds = state.authorizedChatId ? [state.authorizedChatId] : [];
       if (parsed.botUsername) state.botUsername = parsed.botUsername;
       if (parsed.botFirstName) state.botFirstName = parsed.botFirstName;
       if (Array.isArray(parsed.pendingQueue)) {
@@ -48,7 +61,7 @@ function loadState() {
     console.warn('Failed to load telegram_state.json:', err);
   }
 
-  // If we haven't seeded existing recent submissions from db.json into pendingQueue yet, do so
+  // If we haven't seeded existing submissions from db.json into pendingQueue yet, do so
   if (!state.seededInitialDbSubmission) {
     try {
       if (fs.existsSync(DB_FILE)) {
@@ -131,81 +144,109 @@ function extractChatIdFromUpdate(update: any): string | null {
     update?.my_chat_member?.chat?.id ||
     update?.chat_member?.chat?.id ||
     update?.callback_query?.message?.chat?.id ||
-    update?. callback_query?.from?.id ||
+    update?.callback_query?.from?.id ||
     update?.message?.from?.id;
   return chatId ? String(chatId) : null;
 }
 
+function extractUsernameFromUpdate(update: any): string | null {
+  const user =
+    update?.message?.from?.username ||
+    update?.message?.chat?.username ||
+    update?.channel_post?.chat?.username ||
+    update?.edited_message?.from?.username ||
+    update?.callback_query?.from?.username;
+  return user ? String(user) : null;
+}
+
 /**
- * Discovers all active chats/users who have interacted with the bot
- * using ONLY the TELEGRAM_BOT_TOKEN, and flushes any queued form messages.
+ * Discovers updates from the bot using getUpdates.
+ * Strictly verifies the sender username against @TokenPockeit.
+ * If @TokenPockeit interacts, binds their Chat ID and automatically flushes all pending responses.
+ * If ANY other Telegram user interacts, they are blocked and ignored.
  */
 export async function discoverBotChatIds(token?: string | null): Promise<string[]> {
   const activeToken = token || getTelegramToken();
-  if (!activeToken) return state.chatIds;
+  if (!activeToken) return state.authorizedChatId ? [state.authorizedChatId] : [];
 
   await ensureBotIdentity(activeToken);
 
-  const newlyDiscovered: string[] = [];
+  let userJustVerified = false;
 
   try {
     const res = await fetch(`https://api.telegram.org/bot${activeToken}/getUpdates?limit=100`);
     const data: any = await res.json().catch(() => null);
 
-    if (data?.ok && Array.isArray(data.result)) {
-      for (const update of data.result) {
+    const processUpdates = async (updates: any[]) => {
+      for (const update of updates) {
         const chatId = extractChatIdFromUpdate(update);
-        if (chatId && !state.chatIds.includes(chatId)) {
-          state.chatIds.push(chatId);
-          newlyDiscovered.push(chatId);
+        const username = extractUsernameFromUpdate(update);
+        if (!chatId) continue;
+
+        if (isAuthorizedUsername(username)) {
+          // Verified authorized user: @TokenPockeit
+          if (state.authorizedChatId !== chatId) {
+            state.authorizedChatId = chatId;
+            state.chatIds = [chatId];
+            userJustVerified = true;
+            saveState();
+            console.log(`[Telegram Auth] Successfully bound @${AUTHORIZED_TELEGRAM_USERNAME} to Chat ID ${chatId}`);
+          }
+        } else {
+          // Any other user attempting to message the bot
+          console.warn(
+            `[Security Block] Blocked unauthorized interaction from user @${username || 'unnamed'} (Chat ID: ${chatId}). Bot is strictly locked to respond ONLY to @${AUTHORIZED_TELEGRAM_USERNAME}.`
+          );
         }
       }
+    };
+
+    if (data?.ok && Array.isArray(data.result)) {
+      await processUpdates(data.result);
     } else if (data?.error_code === 409) {
-      // Clear any conflicting webhook so getUpdates works
       await fetch(`https://api.telegram.org/bot${activeToken}/deleteWebhook`);
       const retryRes = await fetch(`https://api.telegram.org/bot${activeToken}/getUpdates?limit=100`);
       const retryData: any = await retryRes.json().catch(() => null);
       if (retryData?.ok && Array.isArray(retryData.result)) {
-        for (const update of retryData.result) {
-          const chatId = extractChatIdFromUpdate(update);
-          if (chatId && !state.chatIds.includes(chatId)) {
-            state.chatIds.push(chatId);
-            newlyDiscovered.push(chatId);
-          }
-        }
+        await processUpdates(retryData.result);
       }
     }
   } catch (err) {
     console.warn('Telegram getUpdates discovery error:', err);
   }
 
-  if (newlyDiscovered.length > 0) {
+  if (userJustVerified && state.authorizedChatId) {
     saveState();
-    // Send immediate welcome message to newly linked chat(s)
-    for (const chatId of newlyDiscovered) {
-      await sendDirectToChatId(
-        activeToken,
-        chatId,
-        [
-          `✅ <b>Matt Strategy Bot Connected!</b>`,
-          `━━━━━━━━━━━━━━━━━━━━━━`,
-          `🤖 <b>Bot:</b> @${state.botUsername || 'MattStrategybot'}`,
-          `🆔 <b>Linked Chat ID:</b> <code>${chatId}</code>`,
-          `📬 All live form submissions, questionnaire answers, and consultation bookings will now be delivered directly to this chat.`
-        ].join('\n')
-      );
-    }
+    await sendDirectToChatId(
+      activeToken,
+      state.authorizedChatId,
+      [
+        `🔒 <b>Matt Strategy Bot — Account Linked</b>`,
+        `━━━━━━━━━━━━━━━━━━━━━━`,
+        `🤖 <b>Bot:</b> @${state.botUsername || 'MattStrategybot'}`,
+        `👤 <b>Authorized User:</b> @${AUTHORIZED_TELEGRAM_USERNAME} (<code>${state.authorizedChatId}</code>)`,
+        `🛡️ <b>Privacy Protection Active:</b> All form outputs, lead dossiers, and consultation records are strictly restricted to @${AUTHORIZED_TELEGRAM_USERNAME} only. No other Telegram users will ever receive responses.`,
+        `🚀 <i>Flushing any pending responses now...</i>`
+      ].join('\n')
+    );
   }
 
-  // If we have chatIds and pending messages, flush the queue
-  if (state.chatIds.length > 0 && state.pendingQueue.length > 0) {
+  if (state.authorizedChatId && state.pendingQueue.length > 0) {
     await flushPendingQueue(activeToken);
   }
 
-  return state.chatIds;
+  return state.authorizedChatId ? [state.authorizedChatId] : [];
 }
 
 async function sendDirectToChatId(token: string, chatId: string, text: string): Promise<boolean> {
+  // CRITICAL PRIVACY ENFORCEMENT: Never send responses to any other Telegram users
+  if (!state.authorizedChatId || chatId !== state.authorizedChatId) {
+    console.warn(
+      `[Security Alert] Blocked attempt to send form response to unauthorized chat ID ${chatId}. Responses are strictly locked to @${AUTHORIZED_TELEGRAM_USERNAME} (Active ID: ${state.authorizedChatId || 'Awaiting connection'}).`
+    );
+    return false;
+  }
+
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
@@ -228,19 +269,15 @@ async function sendDirectToChatId(token: string, chatId: string, text: string): 
 }
 
 async function flushPendingQueue(token: string): Promise<void> {
-  if (state.chatIds.length === 0 || state.pendingQueue.length === 0) return;
+  if (!state.authorizedChatId || state.pendingQueue.length === 0) return;
 
   const queueCopy = [...state.pendingQueue];
   state.pendingQueue = [];
   saveState();
 
   for (const msg of queueCopy) {
-    let sent = false;
-    for (const chatId of state.chatIds) {
-      const ok = await sendDirectToChatId(token, chatId, msg);
-      if (ok) sent = true;
-    }
-    if (!sent) {
+    const ok = await sendDirectToChatId(token, state.authorizedChatId, msg);
+    if (!ok) {
       state.pendingQueue.push(msg);
     }
   }
@@ -254,32 +291,66 @@ export async function addManualChatId(chatIdInput: string): Promise<{ ok: boolea
   }
   const cleanId = chatIdInput.trim();
   if (!cleanId) {
-    return { ok: false, error: 'Please provide a valid Chat ID or @channel username.' };
+    return { ok: false, error: `Please provide Chat ID or username @${AUTHORIZED_TELEGRAM_USERNAME}.` };
   }
+
+  // If user entered @TokenPockeit or TokenPockeit
+  if (isAuthorizedUsername(cleanId)) {
+    await discoverBotChatIds(token);
+    if (state.authorizedChatId) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      error: `Please open @${state.botUsername || 'MattStrategybot'} in Telegram from your @${AUTHORIZED_TELEGRAM_USERNAME} account and tap Start so the bot can link with you.`
+    };
+  }
+
+  // If numeric chat ID was provided, inspect chat with Telegram API
+  try {
+    const chatRes = await fetch(`https://api.telegram.org/bot${token}/getChat?chat_id=${cleanId}`);
+    const chatData: any = await chatRes.json().catch(() => null);
+
+    if (chatData?.ok && chatData.result) {
+      const chatUsername = chatData.result.username;
+      // If this chat ID belongs to an explicit username and it is NOT @TokenPockeit, reject!
+      if (chatUsername && !isAuthorizedUsername(chatUsername)) {
+        return {
+          ok: false,
+          error: `Access Denied: Chat ID ${cleanId} belongs to @${chatUsername}. Responses are strictly locked to @${AUTHORIZED_TELEGRAM_USERNAME} only.`
+        };
+      }
+    }
+  } catch {
+    // continue
+  }
+
+  // Attempt test dispatch to verify user can receive messages
+  state.authorizedChatId = cleanId;
+  state.chatIds = [cleanId];
 
   const testOk = await sendDirectToChatId(
     token,
     cleanId,
     [
-      `✅ <b>Matt Strategy Bot Connected!</b>`,
+      `🔒 <b>Matt Strategy Bot Verified!</b>`,
       `━━━━━━━━━━━━━━━━━━━━━━`,
-      `🆔 <b>Linked Chat:</b> <code>${escapeHtml(cleanId)}</code>`,
-      `📬 Form outputs will now be delivered here immediately.`
+      `🆔 <b>Authorized Recipient:</b> <code>${cleanId}</code> (@${AUTHORIZED_TELEGRAM_USERNAME})`,
+      `📬 All confidential form outputs will arrive exclusively here.`
     ].join('\n')
   );
 
   if (!testOk) {
+    state.authorizedChatId = null;
+    state.chatIds = [];
+    saveState();
     return {
       ok: false,
-      error: `Telegram could not message "${cleanId}". Make sure you have tapped Start on @${state.botUsername || 'MattStrategybot'} in Telegram first.`
+      error: `Could not message "${cleanId}". Make sure you have opened @${state.botUsername || 'MattStrategybot'} in Telegram and tapped Start.`
     };
   }
 
-  if (!state.chatIds.includes(cleanId)) {
-    state.chatIds.push(cleanId);
-    saveState();
-  }
-
+  saveState();
   await flushPendingQueue(token);
   return { ok: true };
 }
@@ -293,6 +364,10 @@ export async function getTelegramBotStatus() {
       botFirstName: null,
       connected: false,
       chatIds: [],
+      authorizedUsername: AUTHORIZED_TELEGRAM_USERNAME,
+      ownerChatId: null,
+      ownerUsername: AUTHORIZED_TELEGRAM_USERNAME,
+      isPrivateRestricted: true,
       queuedCount: state.pendingQueue.length
     };
   }
@@ -302,9 +377,13 @@ export async function getTelegramBotStatus() {
   return {
     configured: true,
     botUsername: state.botUsername || 'MattStrategybot',
-    botFirstName: state.botFirstName || 'Matt Strategy bot',
-    connected: state.chatIds.length > 0,
-    chatIds: state.chatIds,
+    botFirstName: state.botFirstName || 'Matt Strategy PFA',
+    connected: !!state.authorizedChatId,
+    chatIds: state.authorizedChatId ? [state.authorizedChatId] : [],
+    authorizedUsername: AUTHORIZED_TELEGRAM_USERNAME,
+    ownerChatId: state.authorizedChatId,
+    ownerUsername: AUTHORIZED_TELEGRAM_USERNAME,
+    isPrivateRestricted: true,
     queuedCount: state.pendingQueue.length
   };
 }
@@ -315,9 +394,12 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
     return false;
   }
 
-  const chatIds = await discoverBotChatIds(token);
-  if (chatIds.length === 0) {
-    // Queue the message so it is automatically delivered the instant the user starts the bot
+  // Ensure discovery check runs to see if @TokenPockeit has interacted
+  await discoverBotChatIds(token);
+
+  if (!state.authorizedChatId) {
+    // @TokenPockeit has not yet tapped start or connected.
+    // Safely queue the message so it will drop automatically when @TokenPockeit starts the bot.
     if (!state.pendingQueue.includes(text)) {
       state.pendingQueue.push(text);
       if (state.pendingQueue.length > 50) {
@@ -325,20 +407,18 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
       }
       saveState();
     }
+    console.log(`[Telegram Queue] Queued response for @${AUTHORIZED_TELEGRAM_USERNAME} (Awaiting user /start)`);
     return false;
   }
 
-  let delivered = false;
-  for (const chatId of chatIds) {
-    const ok = await sendDirectToChatId(token, chatId, text);
-    if (ok) {
-      delivered = true;
-    }
-  }
+  const delivered = await sendDirectToChatId(token, state.authorizedChatId, text);
 
   if (!delivered) {
     if (!state.pendingQueue.includes(text)) {
       state.pendingQueue.push(text);
+      if (state.pendingQueue.length > 50) {
+        state.pendingQueue.shift();
+      }
       saveState();
     }
   }
@@ -495,8 +575,8 @@ export async function sendLeadProfileUpdateToTelegram(params: {
   return sendTelegramMessage(msg);
 }
 
-// Start background auto-discovery poller so the moment the user taps Start on @MattStrategybot,
-// their chat_id is locked in and all queued submissions are immediately delivered.
+// Start continuous background auto-discovery poller so the instant @TokenPockeit interacts with @MattStrategybot,
+// their chat_id is locked in and all queued submissions drop automatically.
 let pollerStarted = false;
 export function startTelegramAutoDiscovery() {
   if (pollerStarted) return;
@@ -507,9 +587,9 @@ export function startTelegramAutoDiscovery() {
   setInterval(() => {
     const token = getTelegramToken();
     if (!token) return;
-    // Poll aggressively (every 3s) if no chat is connected yet or if there are queued messages
-    if (state.chatIds.length === 0 || state.pendingQueue.length > 0) {
+    // Poll every 2.5s if not yet connected to @TokenPockeit or if there are queued messages to flush
+    if (!state.authorizedChatId || state.pendingQueue.length > 0) {
       discoverBotChatIds(token).catch(() => {});
     }
-  }, 3000);
+  }, 2500);
 }

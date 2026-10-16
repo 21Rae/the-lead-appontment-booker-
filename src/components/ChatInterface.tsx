@@ -82,14 +82,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [hasDismissedResumeCard, setHasDismissedResumeCard] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Email Gate state
-  const [gateEmail, setGateEmail] = useState('');
-  const [gateError, setGateError] = useState<string | null>(null);
-  const [isSubmittingGate, setIsSubmittingGate] = useState(false);
-  const gateEmailInputRef = useRef<HTMLInputElement>(null);
-
-  const hasEmail = Boolean(visitor?.email && visitor.email.includes('@'));
-
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -98,38 +90,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, saveStatus, isSubmitting, hasEmail]);
-
-  // Initial Email submit handler
-  const handleInitialEmailSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const clean = gateEmail.trim();
-    if (!clean || !clean.includes('@') || !clean.includes('.')) {
-      setGateError('Please provide a valid email address to continue.');
-      gateEmailInputRef.current?.focus();
-      return;
-    }
-
-    setIsSubmittingGate(true);
-    setGateError(null);
-
-    try {
-      await onCaptureEmail(clean);
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 2500);
-    } catch (err) {
-      console.error('Email capture failed:', err);
-      setGateError('Unable to save email right now. Please try again.');
-    } finally {
-      setIsSubmittingGate(false);
-    }
-  };
-
-  const promptForEmail = () => {
-    setGateError('Please enter your email above to begin.');
-    gateEmailInputRef.current?.focus();
-    gateEmailInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  };
+  }, [messages, saveStatus, isSubmitting]);
 
   // Find latest agent question message
   const latestAgentMessage = [...messages].reverse().find((m) => m.sender === 'agent');
@@ -161,11 +122,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // Handle single option button selection
   const handleSelectOption = async (option: MessageOption) => {
-    if (!hasEmail) {
-      promptForEmail();
-      return;
-    }
-
     if (!latestAgentMessage || isSubmitting) return;
 
     setIsSubmitting(true);
@@ -203,11 +159,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // Handle multi-select toggle
   const toggleMultiSelect = (val: string) => {
-    if (!hasEmail) {
-      promptForEmail();
-      return;
-    }
-
     if (selectedMulti.includes(val)) {
       setSelectedMulti(selectedMulti.filter((v) => v !== val));
     } else {
@@ -217,11 +168,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // Submit multi-select choices
   const handleSubmitMultiSelect = async () => {
-    if (!hasEmail) {
-      promptForEmail();
-      return;
-    }
-
     if (selectedMulti.length === 0 || !latestAgentMessage || isSubmitting) return;
 
     setIsSubmitting(true);
@@ -259,11 +205,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   // Submit free text message
   const handleSendText = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-
-    if (!hasEmail) {
-      promptForEmail();
-      return;
-    }
 
     if (!inputText.trim() || isSubmitting) return;
 
@@ -503,76 +444,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         {latestAgentMessage && !isSubmitting && (
           <div className="max-w-2xl mr-auto space-y-3 pt-2">
             
-            {/* MANDATORY EMAIL ACCESS GATE: User MUST provide email before interacting */}
-            {!hasEmail ? (
-              <div className="p-5 sm:p-6 bg-white rounded-2xl border-2 border-emerald-600/30 shadow-md space-y-4 max-w-xl">
-                <div className="flex items-start gap-3.5">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center shrink-0">
-                    <Mail className="w-5 h-5 text-emerald-700" />
-                  </div>
-                  <div>
-                    <div className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                      <ShieldCheck className="w-3 h-3 text-emerald-600" />
-                      Email Required to Begin
-                    </div>
-                    <h4 className="text-sm font-bold text-slate-900 mt-1.5">
-                      Please provide your email to start your consultation
-                    </h4>
-                    <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                      Marcus Sterling, CFP® requires your email to securely preserve your bespoke wealth strategy dossier and consultation notes.
-                    </p>
-                  </div>
-                </div>
-
-                <form onSubmit={handleInitialEmailSubmit} className="space-y-3 pt-1">
-                  <div>
-                    <label htmlFor="required-visitor-email" className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                      Your Email Address <span className="text-emerald-600">*</span>
-                    </label>
-                    <div className="relative">
-                      <input
-                        type="email"
-                        id="required-visitor-email"
-                        ref={gateEmailInputRef}
-                        value={gateEmail}
-                        onChange={(e) => {
-                          setGateEmail(e.target.value);
-                          setGateError(null);
-                        }}
-                        placeholder="name@example.com"
-                        required
-                        className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-slate-300 focus:border-emerald-600 focus:ring-2 focus:ring-emerald-500/20 text-xs sm:text-sm text-slate-900 bg-slate-50/50 outline-none transition"
-                        autoFocus
-                      />
-                      <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    </div>
-                    {gateError && (
-                      <p className="text-[11px] text-rose-600 font-medium mt-1.5 flex items-center gap-1">
-                        <AlertCircle className="w-3.5 h-3.5" />
-                        {gateError}
-                      </p>
-                    )}
-                  </div>
-
-                  <button
-                    type="submit"
-                    id="required-email-submit-btn"
-                    disabled={isSubmittingGate || !gateEmail.trim()}
-                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm transition flex items-center justify-center gap-2 shadow-xs cursor-pointer"
-                  >
-                    <span>{isSubmittingGate ? 'Verifying...' : 'Begin Consultation with Marcus'}</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-
-                  <div className="flex items-center justify-center gap-1.5 text-[10px] text-slate-400 pt-0.5">
-                    <Lock className="w-3 h-3 text-emerald-700" />
-                    <span>FCA-compliant encryption • We strictly protect your privacy</span>
-                  </div>
-                </form>
-              </div>
-            ) : (
-              <>
-                {/* 1. Multi-Select Options if configured */}
+            {/* 1. Multi-Select Options if configured */}
                 {latestAgentMessage.allowMultiSelect && latestAgentMessage.options && (
                   <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-3">
                     <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex items-center justify-between">
@@ -741,9 +613,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     </div>
                   </div>
                 )}
-              </>
-            )}
-
           </div>
         )}
 
@@ -786,11 +655,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       <div className="bg-white border-t border-slate-200 px-4 sm:px-6 py-3 sticky bottom-0 z-20">
         <form
           onSubmit={(e) => {
-            if (!hasEmail) {
-              e.preventDefault();
-              promptForEmail();
-              return;
-            }
             handleSendText(e);
           }}
           className="max-w-4xl mx-auto flex items-center gap-2"
@@ -800,26 +664,17 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             id="chat-bottom-inquiry-input"
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
-            onFocus={() => {
-              if (!hasEmail) {
-                promptForEmail();
-              }
-            }}
-            placeholder={
-              hasEmail
-                ? "Ask Marcus a question or explain your circumstances..."
-                : "Please enter your email above to unlock the conversation..."
-            }
+            placeholder="Ask Marcus a question or explain your circumstances..."
             disabled={isSubmitting}
             className="flex-1 px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs sm:text-sm focus:outline-hidden focus:ring-1 focus:ring-emerald-500 text-slate-800"
           />
           <button
             type="submit"
             id="chat-bottom-send-btn"
-            disabled={isSubmitting || (hasEmail && !inputText.trim())}
+            disabled={isSubmitting || !inputText.trim()}
             className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white font-semibold text-xs sm:text-sm transition flex items-center gap-1.5 shadow-xs cursor-pointer"
           >
-            <span>{hasEmail ? 'Send' : 'Email Required'}</span>
+            <span>Send</span>
             <Send className="w-3.5 h-3.5" />
           </button>
         </form>
